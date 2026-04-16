@@ -1,0 +1,117 @@
+SET LINESIZE 130
+SET PAGESIZE 50
+SET TRIMSPOOL ON
+SET VERIFY OFF
+SET FEEDBACK OFF
+
+COLUMN run_date NEW_VALUE _run_date
+SELECT TO_CHAR(SYSDATE, 'DD-MON-YYYY') run_date FROM dual;
+
+TTITLE LEFT 'Date: ' _run_date SKIP 1 -
+CENTER 'TOP 5 GENRE PERFORMANCE AND INVESTMENT PRIORITY COMPARISON' SKIP 1 -
+CENTER 'Trend Analysis: 2022-2024' RIGHT 'Page: ' SQL.PNO SKIP 2
+
+BREAK ON year SKIP 2
+
+COLUMN year FORMAT 9999 HEADING 'Year'
+COLUMN rank FORMAT 99 HEADING 'Rank'
+COLUMN genre FORMAT A16 HEADING 'Genre'
+COLUMN total_demand FORMAT 99999 HEADING 'Total|Demand'
+COLUMN revenue FORMAT 9999.99 HEADING 'Revenue|(RM)'
+COLUMN growth_rate FORMAT 999.99 HEADING 'Growth|%'
+COLUMN efficiency FORMAT 99.99 HEADING 'Effic|%'
+COLUMN priority FORMAT A15 HEADING 'Action Priority'
+
+WITH annual_performance AS (
+    SELECT
+        -- WHEN: Annual periods for 3-year comparison
+        dd.cal_year AS year,
+        -- WHAT: Genre performance metrics
+        db.genre_name,
+        -- WHO: Member engagement count
+        COUNT(DISTINCT fb.member_surrogate_key) AS unique_members,
+        -- WHERE: Library activity metrics  
+        COUNT(DISTINCT fb.borrowing_id) AS borrow_volume,
+        COUNT(DISTINCT fs.sales_id) AS sales_transactions,
+        -- HOW MUCH: Financial performance
+        NVL(SUM(fs.totalamount), 0) AS sales_revenue,
+        NVL(SUM(ffb.fee), 0) AS facility_revenue,
+        -- WHY: Service quality for investment decisions
+        SUM(CASE WHEN fb.is_returned = 'Y' AND fb.is_overdue = 'N' THEN 1 ELSE 0 END) AS on_time_returns,
+        COUNT(CASE WHEN fb.was_reserved = 'Y' THEN 1 END) AS reservation_demand
+    FROM dim_date dd
+    JOIN fact_borrowing fb ON dd.date_key = fb.borrow_date_key
+    JOIN dim_book db ON fb.book_key = db.book_key
+    LEFT JOIN fact_book_sale fs ON db.book_key = fs.book_key 
+        AND dd.date_key = fs.sale_date_key
+    LEFT JOIN fact_facility_booking ffb ON fb.member_surrogate_key = ffb.member_surrogate_key 
+        AND ABS(dd.date_key - ffb.booking_date_key) <= 7
+    WHERE dd.cal_year IN (2022, 2023, 2024)  -- 3-year period
+        AND db.is_current_flag = 'Y'
+    GROUP BY dd.cal_year, db.genre_name
+),
+year_over_year AS (
+    SELECT 
+        ap.year,
+        ap.genre_name,
+        -- Combined demand indicator
+        (ap.borrow_volume + ap.sales_transactions * 5 + ap.reservation_demand * 2) AS total_demand,
+        -- Total revenue
+        (ap.sales_revenue + ap.facility_revenue) AS revenue,
+        -- Efficiency rate: on-time returns percentage
+        CASE 
+            WHEN ap.borrow_volume > 0 
+            THEN (ap.on_time_returns * 100.0 / ap.borrow_volume)
+            ELSE 0
+        END AS efficiency_rate,
+        -- Get previous year metrics for growth calculation
+        LAG(ap.borrow_volume + ap.sales_transactions * 5) OVER (
+            PARTITION BY ap.genre_name ORDER BY ap.year
+        ) AS prev_year_demand
+    FROM annual_performance ap
+),
+ranked_genres AS (
+    SELECT 
+        year,
+        genre_name,
+        total_demand,
+        revenue,
+        -- Growth calculation
+        CASE 
+            WHEN prev_year_demand > 0 
+            THEN ((total_demand - prev_year_demand) * 100.0 / prev_year_demand)
+            ELSE 0
+        END AS growth_rate,
+        efficiency_rate,
+        -- Ranking by combined score
+        ROW_NUMBER() OVER (
+            PARTITION BY year 
+            ORDER BY (total_demand * 0.4 + revenue * 0.4 + efficiency_rate * 0.2) DESC
+        ) AS rank
+    FROM year_over_year
+)
+SELECT 
+    year,
+    rank,
+    genre_name AS genre,
+    total_demand,
+    revenue,
+    ROUND(growth_rate, 1) AS growth_rate,
+    ROUND(efficiency_rate, 1) AS efficiency,
+    -- HOW: Specific investment actions
+    CASE 
+        WHEN rank = 1 AND growth_rate > 10 THEN 'Buy 50+ copies'
+        WHEN rank = 1 THEN 'Buy 30+ copies'
+        WHEN rank <= 2 AND revenue > 1000 THEN 'Buy 20+ copies'
+        WHEN rank <= 3 AND growth_rate > 5 THEN 'Buy 15+ copies'
+        WHEN rank <= 5 AND efficiency_rate > 80 THEN 'Keep current'
+        WHEN growth_rate < -10 THEN 'Sell 20% stock'
+        ELSE 'Buy 5 popular'
+    END AS priority
+FROM ranked_genres
+WHERE rank <= 5
+ORDER BY year DESC, rank;
+
+CLEAR COLUMNS
+CLEAR BREAKS
+TTITLE OFF

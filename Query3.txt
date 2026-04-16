@@ -1,0 +1,116 @@
+SET LINESIZE 130
+SET PAGESIZE 50
+SET TRIMSPOOL ON
+SET VERIFY OFF
+SET FEEDBACK OFF
+SET DEFINE OFF
+
+COLUMN run_date NEW_VALUE _run_date
+SELECT TO_CHAR(SYSDATE, 'DD-MON-YYYY') run_date FROM dual;
+
+TTITLE LEFT 'Date: ' _run_date SKIP 1 -
+CENTER 'OPERATIONAL EFFICIENCY BY PEAK VS OFF-PEAK PERIODS' SKIP 1 -
+CENTER 'Workload Pattern Analysis: 2022-2024' RIGHT 'Page: ' SQL.PNO SKIP 2
+
+BREAK ON year SKIP 1 ON period_type SKIP 1
+
+COLUMN year FORMAT 9999 HEADING 'Year'
+COLUMN period_type FORMAT A10 HEADING 'Period'
+COLUMN month_name FORMAT A9 HEADING 'Month'
+COLUMN daily_load FORMAT 99,999 HEADING 'Daily|Load'
+COLUMN process_speed FORMAT 99.9 HEADING 'Speed|Score'
+COLUMN success_rate FORMAT 99.9 HEADING 'Success|%'
+COLUMN stress_index FORMAT 9,999.99 HEADING 'Stress|Index'
+COLUMN lost_revenue FORMAT 9,999,999.99 HEADING 'Lost Rev|(RM)'
+COLUMN optimization FORMAT A15 HEADING 'Optimization'
+
+WITH monthly_workload AS (
+    SELECT
+        dd.cal_year AS year,
+        TO_CHAR(dd.cal_date, 'Mon') AS month_name,
+        EXTRACT(MONTH FROM dd.cal_date) AS month_num,
+        COUNT(DISTINCT dd.date_key) AS days_count,
+        -- WHAT: Operational metrics
+        COUNT(fb.borrowing_id) AS borrow_volume,
+        AVG(CASE WHEN fb.return_date_key IS NOT NULL 
+            THEN fb.return_date_key - fb.borrow_date_key END) AS avg_process_time,
+        -- WHERE: Success and failure locations
+        SUM(CASE WHEN fb.is_returned = 'Y' AND fb.is_overdue = 'N' THEN 1 ELSE 0 END) AS successful_ops,
+        SUM(CASE WHEN fb.is_overdue = 'Y' THEN 1 ELSE 0 END) AS failed_ops,
+        -- WHY: Revenue loss analysis
+        NVL(SUM(CASE WHEN ff.payment_status = 'UNPAID' THEN ff.fine_amount END), 0) AS uncollected_fines,
+        COUNT(DISTINCT ffb.facility_booking_id) AS facility_bookings
+    FROM dim_date dd
+    LEFT JOIN fact_borrowing fb ON dd.date_key = fb.borrow_date_key
+    LEFT JOIN fact_fines ff ON dd.date_key = ff.fine_date_key
+    LEFT JOIN fact_facility_booking ffb ON dd.date_key = ffb.booking_date_key
+    WHERE dd.cal_year BETWEEN 2022 AND 2024  -- 3-year analysis
+    GROUP BY dd.cal_year, TO_CHAR(dd.cal_date, 'Mon'), EXTRACT(MONTH FROM dd.cal_date)
+),
+yearly_averages AS (
+    SELECT 
+        year,
+        AVG(borrow_volume / NULLIF(days_count, 0)) AS avg_daily_workload
+    FROM monthly_workload
+    GROUP BY year
+),
+workload_classification AS (
+    SELECT
+        mw.year,
+        mw.month_name,
+        mw.month_num,
+        -- WHO: Staff workload per day
+        mw.borrow_volume / NULLIF(mw.days_count, 0) AS daily_workload,
+        mw.avg_process_time,
+        CASE WHEN mw.avg_process_time > 0 THEN 30 / mw.avg_process_time ELSE 0 END AS speed_score,
+        -- WHEN: Success timing
+        CASE WHEN mw.borrow_volume > 0 
+            THEN (mw.successful_ops * 100.0 / mw.borrow_volume) ELSE 0 END AS success_rate,
+        CASE WHEN mw.borrow_volume > 0 
+            THEN (mw.failed_ops * 100.0 / mw.borrow_volume) ELSE 0 END AS failure_rate,
+        mw.uncollected_fines + (mw.failed_ops * 2) AS lost_revenue,
+        -- HOW: Period classification
+        CASE 
+            WHEN (mw.borrow_volume / NULLIF(mw.days_count, 0)) > ya.avg_daily_workload
+            THEN 'PEAK'
+            ELSE 'OFF-PEAK'
+        END AS period_type
+    FROM monthly_workload mw
+    JOIN yearly_averages ya ON mw.year = ya.year
+)
+SELECT 
+    year,
+    period_type,
+    month_name,
+    ROUND(daily_workload, 0) AS daily_load,
+    ROUND(speed_score, 1) AS process_speed,
+    ROUND(success_rate, 1) AS success_rate,
+    ROUND(failure_rate * (daily_workload / 100), 1) AS stress_index,
+    ROUND(lost_revenue, 2) AS lost_revenue,
+    -- HOW: Specific optimization actions
+    CASE 
+        -- Peak period actions
+        WHEN period_type = 'PEAK' AND month_name = 'Jan' THEN '+2 temp staff'
+        WHEN period_type = 'PEAK' AND month_name = 'Feb' THEN '8am-10pm ops'
+        WHEN period_type = 'PEAK' AND month_name = 'Aug' THEN 'Self-checkout'
+        WHEN period_type = 'PEAK' AND month_name = 'Oct' THEN '2-shift work'
+        WHEN period_type = 'PEAK' AND month_name = 'Nov' THEN 'Vendor help'
+        WHEN period_type = 'PEAK' AND month_name = 'Dec' THEN 'Flex roster'
+        WHEN period_type = 'PEAK' THEN '+1 counter'
+        -- Off-peak period actions  
+        WHEN period_type = 'OFF-PEAK' AND lost_revenue > 1000 THEN 'SMS debtors'
+        WHEN period_type = 'OFF-PEAK' AND speed_score < 2.5 THEN '2-day train'
+        WHEN period_type = 'OFF-PEAK' AND success_rate < 60 THEN 'Fix RFID'
+        WHEN period_type = 'OFF-PEAK' AND month_name = 'Mar' THEN 'Stock audit'
+        WHEN period_type = 'OFF-PEAK' AND month_name = 'May' THEN 'Cert course'
+        WHEN period_type = 'OFF-PEAK' AND month_name = 'Sep' THEN 'ISO review'
+        WHEN period_type = 'OFF-PEAK' THEN 'Plan Q4'
+        ELSE 'Normal ops'
+    END AS optimization
+FROM workload_classification
+ORDER BY year DESC, daily_workload ASC, period_type;
+
+CLEAR COLUMNS
+CLEAR BREAKS
+TTITLE OFF
+SET DEFINE ON

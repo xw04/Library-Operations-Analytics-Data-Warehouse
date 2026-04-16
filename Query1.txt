@@ -1,0 +1,110 @@
+SET LINESIZE 130
+SET PAGESIZE 50
+SET TRIMSPOOL ON
+
+
+COLUMN run_date NEW_VALUE _run_date
+SELECT TO_CHAR(SYSDATE, 'DD-MON-YYYY') run_date FROM dual;
+
+TTITLE LEFT 'Date: ' _run_date SKIP 1 -
+CENTER 'Festive Event Strategic Performance Analysis (2022-2024)' -
+SKIP 1 CENTER 'Revenue Impact and Operational Metrics by Event' -
+SKIP 1 RIGHT 'Page: ' SQL.PNO
+
+COLUMN festive_category FORMAT A18 HEADING 'Festive|Category'
+COLUMN festive_event FORMAT A22 HEADING 'Festive Event'
+COLUMN gross_revenue FORMAT 99,999,999.99 HEADING 'Gross Revenue|(RM)'
+COLUMN daily_avg FORMAT 99,999,999.99 HEADING 'Daily Avg|(RM)'
+COLUMN vs_baseline FORMAT 9999.99 HEADING 'vs Base|(x)'
+COLUMN roi_index FORMAT 999,999.99 HEADING 'ROI|Index'
+COLUMN action FORMAT A12 HEADING 'Action'
+
+BREAK ON year SKIP PAGE ON festive_category SKIP 1
+
+WITH festive_data AS (
+    SELECT
+        dd.cal_year AS year,
+        dd.festive_event,
+        
+        CASE
+            WHEN dd.festive_event IN ('CHINESE NEW YEAR', 'HARI RAYA AIDILFITRI', 'DEEPAVALI', 'CHRISTMAS')
+            THEN '1-MAJOR FESTIVALS'
+            WHEN dd.festive_event IN ('NEW YEAR', 'NATIONAL DAY', 'MALAYSIA DAY')
+            THEN '2-NATIONAL HOLIDAYS'
+            WHEN dd.festive_event IN ('WESAK', 'THAIPUSAM', 'HARI RAYA HAJI', 'AWAL MUHARRAM', 'MAULIDUR RASUL')
+            THEN '3-RELIGIOUS EVENTS'
+            WHEN dd.festive_event = 'LABOUR DAY'
+            THEN '4-PUBLIC HOLIDAYS'
+            ELSE '5-OTHER'
+        END AS festive_category,
+        COUNT(DISTINCT dd.date_key) AS event_days,
+        -- Revenue components
+        NVL(SUM(fs.totalamount), 0) AS book_sales,
+        NVL(SUM(ffb.fee), 0) AS facility_fees,
+        NVL(SUM(CASE WHEN ff.payment_status = 'PAID' THEN ff.fine_amount END), 0) AS fine_collections,
+        -- Operational metrics
+        COUNT(DISTINCT fb.borrowing_id) AS total_borrows,
+        COUNT(DISTINCT COALESCE(fb.member_surrogate_key, fs.member_surrogate_key, ffb.member_surrogate_key)) AS engaged_members
+    FROM dim_date dd
+    LEFT JOIN fact_borrowing fb ON dd.date_key = fb.borrow_date_key
+    LEFT JOIN fact_book_sale fs ON dd.date_key = fs.sale_date_key
+    LEFT JOIN fact_facility_booking ffb ON dd.date_key = ffb.booking_date_key
+    LEFT JOIN fact_fines ff ON dd.date_key = ff.fine_date_key
+    WHERE dd.holiday_ind = 'Y'
+        AND dd.festive_event != 'NONE'
+        AND dd.cal_year BETWEEN 2022 AND 2024
+    GROUP BY dd.cal_year, dd.festive_event
+),
+baseline_metrics AS (
+    SELECT
+        cal_year AS year,
+        AVG(daily_revenue) AS baseline_daily_revenue
+    FROM (
+        SELECT
+            dd.cal_year,
+            dd.date_key,
+            NVL(SUM(fs.totalamount), 0) + NVL(SUM(ffb.fee), 0) AS daily_revenue
+        FROM dim_date dd
+        LEFT JOIN fact_book_sale fs ON dd.date_key = fs.sale_date_key
+        LEFT JOIN fact_facility_booking ffb ON dd.date_key = ffb.booking_date_key
+        WHERE dd.holiday_ind = 'N'
+            AND dd.weekend_ind = 'N'
+        GROUP BY dd.cal_year, dd.date_key
+    )
+    GROUP BY cal_year
+),
+performance_analysis AS (
+    SELECT
+        fd.year,
+        fd.festive_category,
+        fd.festive_event,
+        (fd.book_sales + fd.facility_fees + fd.fine_collections) AS total_revenue,
+        (fd.book_sales + fd.facility_fees + fd.fine_collections) / NULLIF(fd.event_days, 0) AS daily_revenue,
+        bm.baseline_daily_revenue,
+        -- Simplified ROI Index based on revenue performance and efficiency
+        ((fd.book_sales + fd.facility_fees + fd.fine_collections) / NULLIF(fd.event_days, 0) / NULLIF(bm.baseline_daily_revenue, 0)) *
+        (fd.total_borrows / NULLIF(fd.engaged_members, 0)) AS roi_index
+    FROM festive_data fd
+    JOIN baseline_metrics bm ON fd.year = bm.year
+)
+SELECT
+    year,
+    SUBSTR(festive_category, 3) AS festive_category,
+    festive_event,
+    total_revenue AS gross_revenue,
+    ROUND(daily_revenue, 2) AS daily_avg,
+    ROUND(daily_revenue / NULLIF(baseline_daily_revenue, 0), 2) AS vs_baseline,
+    ROUND(roi_index, 2) AS roi_index,
+    CASE
+        WHEN roi_index >= 5 THEN 'MAXIMIZE'
+        WHEN roi_index >= 3 THEN 'INCREASE'
+        WHEN roi_index >= 2 THEN 'MAINTAIN'
+        WHEN roi_index >= 1 THEN 'OPTIMIZE'
+        ELSE 'REDUCE'
+    END AS action
+FROM performance_analysis
+ORDER BY year DESC, festive_category, roi_index DESC;
+
+CLEAR COLUMNS
+CLEAR BREAKS
+TTITLE OFF
